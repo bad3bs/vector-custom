@@ -1,0 +1,92 @@
+name: Build Vector with MQTT reconnect fix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout Vector PR #26731
+        uses: actions/checkout@v4
+        with:
+          repository: vectordotdev/vector
+          ref: refs/pull/26731/head
+          path: vector-src
+          fetch-depth: 1
+
+      - name: Show commit
+        run: |
+          cd vector-src
+          git log -1 --oneline
+
+      - name: Create custom Dockerfile
+        run: |
+          cat > vector-src/Dockerfile.mqtt-fix <<'EOF'
+          FROM rust:1.95-bookworm AS builder
+
+          RUN apt-get update && apt-get install -y --no-install-recommends \
+              build-essential \
+              cmake \
+              pkg-config \
+              protobuf-compiler \
+              clang \
+              git \
+              perl \
+              python3 \
+              make \
+              autoconf \
+              automake \
+              libtool \
+              && rm -rf /var/lib/apt/lists/*
+
+          WORKDIR /src
+          COPY . .
+
+          RUN cargo build \
+              --release \
+              --no-default-features \
+              --features "sources-mqtt,transforms-remap,transforms-log_to_metric,sinks-prometheus,sources-internal_metrics,api"
+
+          RUN strip target/release/vector
+
+          FROM timberio/vector:0.60.0-debian
+
+          COPY --from=builder /src/target/release/vector /usr/bin/vector
+
+          ENTRYPOINT ["/usr/bin/vector"]
+          EOF
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -f vector-src/Dockerfile.mqtt-fix \
+            -t vector:0.60.0-mqtt-resubscribe \
+            vector-src
+
+      - name: Check Vector binary
+        run: |
+          docker run --rm \
+            vector:0.60.0-mqtt-resubscribe \
+            --version
+
+      - name: Save Docker image
+        run: |
+          docker save \
+            vector:0.60.0-mqtt-resubscribe \
+            | gzip -1 \
+            > vector-0.60.0-mqtt-resubscribe.tar.gz
+
+          ls -lh vector-0.60.0-mqtt-resubscribe.tar.gz
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vector-0.60.0-mqtt-resubscribe
+          path: vector-0.60.0-mqtt-resubscribe.tar.gz
+          compression-level: 0
+          retention-days: 30
